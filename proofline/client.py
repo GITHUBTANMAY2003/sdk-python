@@ -73,6 +73,7 @@ from ._generated.types import UNSET, Response, Unset
 from ._mcp import AsyncMcpClient, McpClient
 from ._transport import ProoflineError
 from .exports import ExportDataset, ExportFormat, ExportPage, decode_export
+from .findings import PullRequestFindings, pull_request_findings
 from .fixes import AsyncFixesClient, FixesClient
 from .knowledge import AsyncKnowledgeClient, KnowledgeClient
 from .outcomes import ReviewOutcome, outcome
@@ -179,6 +180,42 @@ def _next_cursor(page: ReviewPage, seen: set[str]) -> str | None:
         )
     seen.add(cursor)
     return cursor
+
+
+# The latest run is found by reading every page of the pull request's runs. The
+# contract says only that ReviewPage.items are "newest first" *on this page*: it
+# does not promise ordering across pages, nor that "newest" means the highest
+# run_number. run_number is the one-based, append-only ordinal, so the highest
+# one seen across all pages is the latest run whatever the listing order.
+_RUN_PAGE_SIZE = 100
+_RUN_MAX_PAGES = 100
+
+
+def _run_number(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("The run number must be a positive integer.")
+
+
+def _highest_run(page: ReviewPage, highest: int | None) -> int | None:
+    for item in page.items:
+        number = item.run_number
+        if isinstance(number, int) and number >= 1 and (highest is None or number > highest):
+            highest = number
+    return highest
+
+
+def _latest_run(listed: bool, highest: int | None) -> int | None:
+    # Runs were listed but none names a run number: answering None would claim
+    # that the pull request has no runs.
+    if listed and highest is None:
+        raise _transport.invalid_response()
+    return highest
+
+
+def _findings(review: CustomerReviewDetail, run_number: int) -> PullRequestFindings:
+    if isinstance(review.run_number, int) and review.run_number != run_number:
+        raise _transport.invalid_response()
+    return pull_request_findings(review, run_number)
 
 
 def _pagination_limit(resource: str = "Review") -> ProoflineError:
@@ -369,6 +406,50 @@ class ProoflineClient(Operations):
             pull_request_number,
             run_number,
         )
+
+    def get_pull_request_findings(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        run_number: int | None = None,
+    ) -> PullRequestFindings | None:
+        """Return every finding of one pull request review run.
+
+        Without run_number, the run with the highest run number is read. Returns
+        None when the pull request has no review runs. A run still in progress
+        is returned with its status and the findings recorded so far.
+        """
+        if run_number is None:
+            run_number = self._latest_run_number(organization_id, repository, pull_request_number)
+            if run_number is None:
+                return None
+        else:
+            _run_number(run_number)
+        review = self.get_pull_request_review(
+            organization_id, repository, pull_request_number, run_number
+        )
+        return _findings(review, run_number)
+
+    def _latest_run_number(
+        self, organization_id: UUID, repository: str, pull_request_number: int
+    ) -> int | None:
+        filters: ReviewFilters = {"limit": _RUN_PAGE_SIZE}
+        seen: set[str] = set()
+        highest: int | None = None
+        listed = False
+        for _ in range(_RUN_MAX_PAGES):
+            page = self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=filters
+            )
+            listed = listed or bool(page.items)
+            highest = _highest_run(page, highest)
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return _latest_run(listed, highest)
+            filters["cursor"] = cursor
+        raise _pagination_limit()
 
     def get_deployment_review(self, organization_id: UUID, public_key: str) -> CustomerReviewDetail:
         return self._call(
@@ -743,6 +824,52 @@ class AsyncProoflineClient(AsyncOperations):
             pull_request_number,
             run_number,
         )
+
+    async def get_pull_request_findings(
+        self,
+        organization_id: UUID,
+        repository: str,
+        pull_request_number: int,
+        *,
+        run_number: int | None = None,
+    ) -> PullRequestFindings | None:
+        """Return every finding of one pull request review run.
+
+        Without run_number, the run with the highest run number is read. Returns
+        None when the pull request has no review runs. A run still in progress
+        is returned with its status and the findings recorded so far.
+        """
+        if run_number is None:
+            run_number = await self._latest_run_number(
+                organization_id, repository, pull_request_number
+            )
+            if run_number is None:
+                return None
+        else:
+            _run_number(run_number)
+        review = await self.get_pull_request_review(
+            organization_id, repository, pull_request_number, run_number
+        )
+        return _findings(review, run_number)
+
+    async def _latest_run_number(
+        self, organization_id: UUID, repository: str, pull_request_number: int
+    ) -> int | None:
+        filters: ReviewFilters = {"limit": _RUN_PAGE_SIZE}
+        seen: set[str] = set()
+        highest: int | None = None
+        listed = False
+        for _ in range(_RUN_MAX_PAGES):
+            page = await self.list_pull_request_reviews(
+                organization_id, repository, pull_request_number, filters=filters
+            )
+            listed = listed or bool(page.items)
+            highest = _highest_run(page, highest)
+            cursor = _next_cursor(page, seen)
+            if cursor is None:
+                return _latest_run(listed, highest)
+            filters["cursor"] = cursor
+        raise _pagination_limit()
 
     async def get_deployment_review(
         self, organization_id: UUID, public_key: str

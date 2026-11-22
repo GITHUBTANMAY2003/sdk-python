@@ -55,6 +55,22 @@ if outcome.status != "COMPLETED":
 
 `head_commit_sha` is a full SHA of 40 or 64 hexadecimal characters; any other value raises `ValueError` before a request. A review pinned to another head ends the wait on the read that names it. Its outcome is `INCOMPLETE` whatever the review's own status, its last gap has the reason code `HEAD_COMMIT_MISMATCH`, and `reason` says that the review is pinned to another head commit. A settled review that names no head has `HEAD_COMMIT_UNAVAILABLE` instead and is not `COMPLETED` either. `outcome.review.head_commit_sha` is the commit the review is pinned to. A patch review's head is a derived revision ID, so no commit matches it. In a GitHub Actions `pull_request` job, `GITHUB_SHA` is the merge commit; pass the pull request's head.
 
+## Pull request findings
+
+`get_pull_request_findings` returns every finding of one pull request review run in a single call. It reads the run with the highest run number, following every page of the pull request's runs, or reads the run you pass as `run_number` with one request.
+
+```python
+result = client.get_pull_request_findings(organization_id, "name", 12)
+if result is None:
+    print("No review has run on this pull request.")
+else:
+    print(result.run_number, result.status)
+    for finding in result.findings:
+        print(finding.severity, finding.claim)
+```
+
+`PullRequestFindings.findings` is a tuple of `CustomerFinding`: the code assessment's findings first, then each environment assessment's findings in recorded order. Nothing is filtered, so findings of a withheld review and resolved findings are kept. A review that is still `PENDING` or `RUNNING` is returned with its status and the findings recorded so far. `review` is the full `CustomerReviewDetail`. The result is `None` only when the pull request has no review runs, while an unknown `run_number` raises `ProoflineError`. Unlike `client.fixes.list_open_findings`, which lists environment findings, this includes the code assessment's findings.
+
 ## Review exports
 
 `export_reviews` reads one CSV or NDJSON page over the bounded transport. Export tokens require `analytics:read`.
